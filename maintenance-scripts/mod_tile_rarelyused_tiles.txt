@@ -1,0 +1,5 @@
+#This will purge tiles of zoom over 7 never accessed in the last 50 days (They most likely are rarely requested)
+#Warning ! Your file system must be mounted with the atime (or lazytime) mount option
+#Or else, every meta tile will be deleted !
+
+find /home/big-data/mod_tile/open*map/{8..18} -type f -atime +50 -delete
