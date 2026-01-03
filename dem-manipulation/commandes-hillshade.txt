@@ -3,7 +3,7 @@
 input=input.tif
 output=output.tif
 
-common_options="-co BIGTIFF=yes --co TILED=yes"
+common_options="-co BIGTIFF=yes -co TILED=yes"
 multi_cpu_options="--config GDAL_NUM_THREADS ALL_CPUS --config GDAL_CACHEMAX 4000 -co NUM_THREADS=ALL_CPUS"
 lossless_compression_options="-co COMPRESS=ZSTD -co PREDICTOR=3"
 
