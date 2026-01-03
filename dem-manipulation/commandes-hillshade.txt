@@ -21,6 +21,6 @@ gdal_edit.py $output -unsetnodata
 gdaldem hillshade -z 1.7 -co COMPRESS=jpeg $common_options $multi_cpu_options $output hillshade-$output
 
 # Create overviews
-gdaladdo -r average $multi_cpu_options hillshade-$output
+gdaladdo -r average hillshade-$output
 
 
