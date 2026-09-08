@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
 # Adaptive tile cache purge script for mod_tile based on access time (atime)
+# Supprime les tuiles les moins récemment accédées en premier (tri par atime),
+# par lots, jusqu'à atteindre TARGET_FREE_KB d'espace libre.
 
 set -euo pipefail
 
@@ -28,36 +30,38 @@ acquire_lock
 # ------------
 
 # --- CONFIGURATION ---
-# Path to the tile cache (supports wildcards like open*map)
+# Chemin du cache de tuiles (supporte les wildcards)
 TARGET_DIR="/home/big-data/mod_tile/open*map"
-# Target zoom levels to clean up
+# Niveaux de zoom à nettoyer
 ZOOMS="{14..18}"
 
-# Normal purge threshold: trigger when free space falls below this (in KB)
+# Seuil de déclenchement en mode normal (charge faible), en KB
 # ~95 GB = 100000000 KB
 MIN_FREE_KB=100000000
 
-# Emergency threshold: purge even under high load if free space falls below this (in KB)
+# Seuil de déclenchement en mode urgence (charge élevée), en KB
 # ~50 GB = 52428800 KB
 EMERGENCY_FREE_KB=52428800
 
-# System load threshold: if 1-minute load average exceeds this, switch to emergency-only mode
+# Cible d'espace libre à atteindre après purge, en KB
+# ~200 GB = 209715200 KB
+TARGET_FREE_KB=209715200
+
+# Seuil de charge système (load average 1 min) pour basculer en mode urgence
 MAX_LOAD=2
 
-# Purge loop parameters
-START_AGE=50      # Initial threshold in days to start looking for old tiles
-MIN_AGE=5         # Safety floor: never delete tiles accessed within the last X days
-AGE_STEP=5        # Decrement value for the day threshold if space is still insufficient
+# Garde-fou : ne jamais supprimer des tuiles accédées dans les X derniers jours
+MIN_AGE=5
+
+# Nombre de fichiers supprimés entre chaque vérification de l'espace disque
+BATCH_SIZE=2000
 # ---------------------
 
-# Function to retrieve available disk space in KB
 get_free_space() {
-    # Using 'eval' to properly expand the path and wildcards.
-    # 'df -k' outputs space in 1KB blocks; awk extracts the 4th column (Available).
     df -k "$(eval echo ${TARGET_DIR} | awk '{print $1}')" | tail -n 1 | awk '{print $4}'
 }
 
-# Determine active threshold based on system load
+# Déterminer le seuil actif selon la charge système
 CURRENT_LOAD=$(awk '{print $1}' /proc/loadavg)
 IS_LOW_LOAD=$(awk "BEGIN {print (${CURRENT_LOAD} < ${MAX_LOAD}) ? 1 : 0}")
 
@@ -75,37 +79,40 @@ else
     echo "Mode: emergency-only (high load) — purge threshold: $((ACTIVE_THRESHOLD / 1024 / 1024)) GB"
 fi
 
-# Quick check: exit immediately if we already have enough space
+# Sortie rapide si l'espace est suffisant
 if [ "${FREE_SPACE}" -ge "${ACTIVE_THRESHOLD}" ]; then
     echo "Sufficient free space available. Nothing to do."
     exit 0
 fi
 
-CURRENT_AGE=${START_AGE}
+echo "Low disk space. Starting purge (target: $((TARGET_FREE_KB / 1024 / 1024)) GB free, safety floor: ${MIN_AGE} days)..."
 
-# Progressive cleanup loop
-while [ "${FREE_SPACE}" -lt "${ACTIVE_THRESHOLD}" ] && [ "${CURRENT_AGE}" -ge "${MIN_AGE}" ]; do
-    echo "Low disk space. Running purge for tiles older than ${CURRENT_AGE} days..."
+count=0
+target_reached=false
 
-    # 'eval' is required here to correctly expand bash braces {12..18} and wildcards
-    eval "ionice -c 3 find ${TARGET_DIR}/${ZOOMS} -type f -atime +${CURRENT_AGE} -delete" || true
+while IFS= read -r -d '' entry; do
+    rm -f "${entry#* }"
+    count=$((count + 1))
 
-    # Brief pause to let the filesystem settle and catch up
-    sleep 2
+    if [ $((count % BATCH_SIZE)) -eq 0 ]; then
+        FREE_SPACE=$(get_free_space)
+        echo "  [${count} files deleted] Free space: $((FREE_SPACE / 1024 / 1024)) GB"
+        if [ "${FREE_SPACE}" -ge "${TARGET_FREE_KB}" ]; then
+            target_reached=true
+            break
+        fi
+    fi
+done < <(eval "ionice -c 3 find ${TARGET_DIR}/${ZOOMS} -type f -atime +${MIN_AGE} -printf '%A@ %p\0'" | sort -zn)
 
-    # Recalculate free space
-    FREE_SPACE=$(get_free_space)
-    echo "Free space after >${CURRENT_AGE}d purge: $((FREE_SPACE / 1024 / 1024)) GB"
+# Vérification finale (dernier lot incomplet < BATCH_SIZE)
+FREE_SPACE=$(get_free_space)
 
-    # Lower the age threshold for the next iteration if needed
-    CURRENT_AGE=$((CURRENT_AGE - AGE_STEP))
-done
-
-# Final status check
-if [ "${FREE_SPACE}" -lt "${ACTIVE_THRESHOLD}" ]; then
-    echo "WARNING: Reached the safety floor of ${MIN_AGE} days, but free space ($((FREE_SPACE / 1024 / 1024)) GB) is still below the target threshold."
+if $target_reached || [ "${FREE_SPACE}" -ge "${TARGET_FREE_KB}" ]; then
+    echo "Success: ${count} files deleted. Free space: $((FREE_SPACE / 1024 / 1024)) GB"
+elif [ "${FREE_SPACE}" -ge "${ACTIVE_THRESHOLD}" ]; then
+    echo "Partial: ${count} files deleted. Free space: $((FREE_SPACE / 1024 / 1024)) GB (above trigger threshold, below target)"
 else
-    echo "Success: Free space target achieved."
+    echo "WARNING: ${count} files deleted but free space ($((FREE_SPACE / 1024 / 1024)) GB) still below trigger threshold. No tiles older than ${MIN_AGE} days remain."
 fi
 
 echo "=== Tile Cache Purge Finished: $(date) ==="
